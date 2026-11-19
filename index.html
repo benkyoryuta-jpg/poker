@@ -375,7 +375,7 @@ input[type=text],input[type=number]{background:var(--bg);border:1px solid var(--
     <summary style="cursor:pointer;font-weight:800;font-size:17px">使い方</summary>
     <ol class="howto">
       <li><b>ホストがテーブルを作る</b>　名前・初期チップ・ブラインドを入れて「テーブルを作成」。6文字のコードが出ます。</li>
-      <li><b>みんなが座る</b>　友だちはこのページを開いてコードを入れ、空いている席をタップ。全員Claudeのアカウントが必要です。</li>
+      <li><b>みんなが座る</b>　友だちはこのページを開いてコードを入れ、空いている席をタップ。Claude上で遊ぶときは全員Claudeのアカウントが必要です。GitHub版は招待リンクを開くだけで参加できます。</li>
       <li><b>ゲーム開始</b>　全員そろったらホストが「ゲーム開始」。ブラインドは自動で出ます。</li>
       <li><b>カードは本物で</b>　画面の指示（2枚ずつ配る、場に3枚、4枚目…）に合わせて実物のトランプを配ってめくります。</li>
       <li><b>自分の番に自分のスマホで</b>　フォールド／チェック・コール／レイズ。レイズは押すと右に縦スライダーとおすすめ額が出て、金額を決めてもう一度押すと確定です。</li>
@@ -748,6 +748,78 @@ async function write(fn,{keepPrev=true}={}){
   }finally{ui.busy=false}
 }
 
+/* ---------------- public relay (outside Claude) ----------------
+   Outside claude.ai there is no shared database, so the page syncs through a public MQTT broker.
+   Each table is one retained message: whoever subscribes gets the latest state at once.
+   The adapter mimics the small slice of the Claude db API this page uses. */
+let RELAY=false;
+const RELAY_URL=window.CHIP_RELAY_URL||'wss://broker.emqx.io:8084/mqtt';
+const RELAY_NS='minna-chip-taku-7q4k/v1';
+const MQTT_JS='https://unpkg.com/mqtt@5.15.1/dist/mqtt.min.js';
+function loadScript(src){return new Promise((ok,ng)=>{const el=document.createElement('script');el.src=src;el.onload=ok;el.onerror=ng;document.head.appendChild(el)})}
+function relayUid(){let u=lsGet('chip-uid','');if(!u){u='r_'+Math.random().toString(36).slice(2,12)+Date.now().toString(36).slice(-4);lsSet('chip-uid',u)}return u}
+function recentCodes(){try{return JSON.parse(lsGet('chip-recent','[]'))||[]}catch(e){return []}}
+function rememberCode(c){const r=recentCodes().filter(x=>x!==c);r.unshift(c);lsSet('chip-recent',JSON.stringify(r.slice(0,12)))}
+function makeRelay(){
+  return new Promise((resolve,reject)=>{
+    const cli=mqtt.connect(RELAY_URL,{clientId:'mct_'+Math.random().toString(36).slice(2,12),clean:true,reconnectPeriod:2500,connectTimeout:9000,keepalive:30});
+    const cache=new Map(),known=new Set(),waiting=new Map(),docSubs=new Map(),colSubs=new Map(),subscribed=new Set();
+    const mine=new Map(); // path -> {rev,w} of my last write, to notice lost races
+    let ready=false;
+    const topic=p=>RELAY_NS+'/'+p;
+    const colOf=p=>p.split('/')[0];
+    const snapOf=p=>{const d=cache.get(p);return {id:p.split('/').pop(),exists:d!=null,data:()=>d==null?undefined:JSON.parse(JSON.stringify(d)),metadata:{fromCache:false,hasPendingWrites:false}}};
+    const colSnap=c=>{const docs=[];cache.forEach((d,p)=>{if(d!=null&&colOf(p)===c&&p.split('/').length===2)docs.push(snapOf(p))});return {docs}};
+    const markKnown=p=>{if(known.has(p))return;known.add(p);(waiting.get(p)||[]).forEach(f=>f());waiting.delete(p)};
+    const notify=p=>{(docSubs.get(p)||[]).forEach(f=>{try{f(snapOf(p))}catch(e){}});const c=colOf(p);(colSubs.get(c)||[]).forEach(f=>{try{f(colSnap(c))}catch(e){}})};
+    function sub(t,onAck){if(subscribed.has(t)){onAck&&onAck();return}subscribed.add(t);cli.subscribe(t,{qos:1},()=>{onAck&&onAck()})}
+    function watch(p){sub(topic(p),()=>setTimeout(()=>{markKnown(p);if(!cache.has(p))notify(p)},700))}
+    function whenKnown(p){return new Promise(ok=>{if(known.has(p))return ok();(waiting.get(p)||waiting.set(p,[]).get(p)).push(ok);watch(p);setTimeout(()=>{markKnown(p);ok()},3500)})}
+    cli.on('message',(t,payload)=>{
+      if(!t.startsWith(RELAY_NS+'/'))return;
+      const p=t.slice(RELAY_NS.length+1);let d=null;
+      if(payload&&payload.length){try{d=JSON.parse(new TextDecoder().decode(payload))}catch(e){return}}
+      const old=cache.get(p);
+      if(d&&old&&typeof d.rev==='number'&&typeof old.rev==='number'&&d.rev<old.rev)return; // stale
+      const m=mine.get(p);
+      if(d&&m&&d.rev===m.rev&&d._w&&d._w!==m.w){mine.delete(p);toast('ほかの人と同時に操作したため、あなたの操作は反映されませんでした。もう一度どうぞ')}
+      cache.set(p,d);markKnown(p);notify(p);
+    });
+    const status=t=>{const el=$('#conn');if(el&&RELAY){el.hidden=false;el.textContent=t}};
+    cli.on('connect',()=>{if(!ready){ready=true;resolve(api)}else status('同期サーバーに再接続しました')});
+    cli.on('offline',()=>{if(ready){status('同期サーバーとの接続が切れました。再接続しています…');toast('通信が切れました。再接続しています…')}});
+    cli.on('error',e=>{if(!ready){ready=true;try{cli.end(true)}catch(_){}reject(e)}});
+    setTimeout(()=>{if(!ready){ready=true;try{cli.end(true)}catch(_){}reject(new Error('timeout'))}},12000);
+    function pub(p,d){return new Promise((ok,ng)=>{cli.publish(topic(p),d==null?'':JSON.stringify(d),{qos:1,retain:true},e=>e?ng(e):ok())})}
+    function doc(p){
+      return {
+        async get(){await whenKnown(p);return snapOf(p)},
+        async set(v){const w=Math.random().toString(36).slice(2,10);const d=Object.assign({},v,{_w:w});
+          if(typeof d.rev==='number')mine.set(p,{rev:d.rev,w});
+          cache.set(p,d);known.add(p);notify(p);await pub(p,d)},
+        async delete(){cache.set(p,null);known.add(p);notify(p);await pub(p,null)},
+        async acquire(){return {acquired:true}},
+        onSnapshot(cb,err){const set=docSubs.get(p)||docSubs.set(p,new Set()).get(p);set.add(cb);
+          if(known.has(p))setTimeout(()=>cb(snapOf(p)),0);else watch(p);
+          return ()=>set.delete(cb)}
+      };
+    }
+    function collection(c){
+      const q={
+        where(){return q},orderBy(){return q},limit(){return q},
+        async get(){await new Promise(r=>setTimeout(r,800));return colSnap(c)},
+        onSnapshot(cb){const set=colSubs.get(c)||colSubs.set(c,new Set()).get(c);set.add(cb);
+          if(c==='tables')recentCodes().forEach(code=>watch('tables/'+code));
+          setTimeout(()=>cb(colSnap(c)),0);return ()=>set.delete(cb)}
+      };
+      return q;
+    }
+    const api={doc,collection,watch,relay:true};
+  });
+}
+// faces are fetched only for people sitting at the open table
+function relayWatchFaces(s){if(!RELAY||!db||!s)return;s.players.forEach(p=>{if(p.uid)db.watch('faces/'+p.uid)})}
+
 /* ---------------- lobby actions ---------------- */
 function genCode(){const A='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';return range(6).map(()=>A[Math.floor(Math.random()*A.length)]).join('')}
 function myName(){return ($('#hostName').value||'').trim().slice(0,10)||lsGet('chip-name','')||'ゲスト'}
@@ -779,12 +851,13 @@ function joinByCode(){
 function showGame(on){$('#game').hidden=!on;$('#lobby').hidden=on;document.body.classList.toggle('ingame',on)}
 function openTable(c){
   code=c;state=null;prevState=null;ui.menu=false;
+  if(RELAY)rememberCode(c);
   try{if(location.hash!=='#'+c)location.hash=c}catch(e){}
   showGame(true);
   $('#gTitle').textContent='テーブル '+c;$('#gSub').textContent='読み込んでいます…';
   ['#labels','#seats','#hud','#bar'].forEach(s=>$(s).innerHTML='');$('#raisePanel').hidden=true;
   if(unsub)unsub();
-  if(!db){$('#gSub').textContent='同期にはサインインが必要です';return}
+  if(!db){$('#gSub').textContent=window.claude?'同期にはサインインが必要です':'同期サーバーに接続できていません。再読み込みしてください';return}
   clearTimeout(loadTimer);
   loadTimer=setTimeout(()=>{if(!state)$('#gSub').textContent='データに接続できません。通信状況を確認してください'},10000);
   unsub=tableRef().onSnapshot(snap=>{
@@ -1215,6 +1288,7 @@ const shortName=n=>String(n||'?').trim().slice(0,1)||'?';
 
 function render(){
   if(!state)return;
+  relayWatchFaces(state);
   const s=state,prev=prevState;
   const fx=computeFx(prev,s);
   const ae=document.activeElement,keep=ae&&ae.id&&ae.tagName==='INPUT'?{id:ae.id,v:ae.value,s:ae.selectionStart}:null;
@@ -1550,7 +1624,8 @@ function renderSheet(){
   root.innerHTML=`<div class="scrim" data-a="menuclose"><div class="sheet" role="dialog" aria-label="メニュー" data-a="noop">
     <div class="row" style="justify-content:space-between"><h2>メニュー</h2><button class="ghost" data-a="menuclose">閉じる</button></div>
     <div class="sec"><div class="eyebrow">ルームコード</div><button class="codebig" data-a="copy">${esc(s.code)}</button>
-      <p class="note">友だちにこのページを共有して、このコードを入れてもらいます。タップでコピーできます。</p></div>
+      ${RELAY?`<button class="pbtn sm" data-a="copylink">招待リンクをコピー</button>
+      <p class="note">リンクを開くだけでこの卓に入れます。アカウントは不要です。</p>`:`<p class="note">友だちにこのページを共有して、このコードを入れてもらいます。タップでコピーできます。</p>`}</div>
     ${host?`<div class="sec"><div class="eyebrow">ホスト</div>
       <div class="row">
         <button class="ghost" data-a="undo" ${s.prev?'':'disabled'}>1つ前に戻す</button>
@@ -1601,6 +1676,10 @@ document.addEventListener('click',e=>{
     case 'hands':ui.menu=false;renderSheet();ui.hands=true;renderHands();break;
     case 'handsclose':ui.hands=false;renderHands();break;
     case 'sound':soundOn=!soundOn;lsSet('chip-sound',soundOn?'1':'0');soundIcon();ensureAudio();clack(0,2);break;
+    case 'copylink':{
+      const link=location.origin+location.pathname+'#'+s.code;
+      try{navigator.clipboard.writeText(link).then(()=>toast('招待リンクをコピーしました'),()=>toast(link))}catch(err){toast(link)}
+      break;}
     case 'copy':{
       try{navigator.clipboard.writeText(s.code).then(()=>toast('コードをコピーしました'),()=>selectText(b))}catch(err){selectText(b)}
       break;}
@@ -1641,9 +1720,11 @@ let rT;window.addEventListener('resize',()=>{clearTimeout(rT);rT=setTimeout(()=>
 function renderTables(snap){
   const box=$('#tables');
   lastTables=snap;
-  const rows=snap.docs.map(d=>d.data()).filter(t=>t&&t.status!=='ended'&&Date.now()-(t.updatedAt||0)<1000*60*60*12);
-  if(!rows.length){box.innerHTML='<p class="note">いま開いているテーブルはありません。下で新しく作るか、コードを入力してください。</p>';return}
-  box.innerHTML='<div class="eyebrow">開いているテーブル</div>'+rows.map(t=>{
+  const recent=RELAY?recentCodes():null;
+  const rows=snap.docs.map(d=>d.data()).filter(t=>t&&t.status!=='ended'&&Date.now()-(t.updatedAt||0)<1000*60*60*12&&(!RELAY||recent.includes(t.code)||t.hostUid===myId))
+    .sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0)).slice(0,8);
+  if(!rows.length){box.innerHTML=`<p class="note">${RELAY?'最近入ったテーブルはありません。':'いま開いているテーブルはありません。'}下で新しく作るか、コードを入力してください。</p>`;return}
+  box.innerHTML=`<div class="eyebrow">${RELAY?'最近のテーブル':'開いているテーブル'}</div>`+rows.map(t=>{
     const names=t.players.filter(p=>p.seated!==false).map(p=>p.name);
     const free=t.players.filter(p=>p.seated===false).length;
     const mine=myId&&t.hostUid===myId&&!readOnly,armed=ui.armDel===t.code;
@@ -1665,12 +1746,21 @@ async function boot(){
   if(user){try{myId=await user.id()}catch(e){myId=null}
     try{const w=await user.can('data.write');if(w===false)readOnly=true}catch(e){}}
   const conn=$('#conn');
-  if(!db){conn.textContent='同期するにはClaudeにサインインしてこのページを開いてください。';$('#createBtn').disabled=true}
+  if(!cl){ // opened outside Claude: sync through the public relay
+    conn.textContent='同期サーバーに接続しています…';$('#createBtn').disabled=true;
+    try{
+      if(!window.mqtt)await loadScript(MQTT_JS);
+      db=await makeRelay();RELAY=true;myId=relayUid();readOnly=false;$('#createBtn').disabled=false;
+      conn.textContent='公開の中継サーバーで同期しています。コードを知っている人は誰でも参加できます。';
+    }catch(e){db=null;conn.textContent='同期サーバーに接続できませんでした。通信状況を確かめて再読み込みしてください。デモは遊べます。'}
+  }
+  if(!db){if(cl)conn.textContent='同期するにはClaudeにサインインしてこのページを開いてください。';$('#createBtn').disabled=true}
   else if(readOnly){conn.textContent='観戦のみ：このページに書き込む権限がありません。';$('#createBtn').disabled=true}
-  else conn.hidden=true;
+  else if(!RELAY)conn.hidden=true;
   if(db){try{db.collection('tables').orderBy('updatedAt','desc').limit(8).onSnapshot(renderTables,()=>{$('#tables').innerHTML=''})}catch(e){}
     setTimeout(cleanupMine,1500);
-    try{db.collection('faces').onSnapshot(snap=>{const m={};snap.docs.forEach(d=>{const v=d.data();if(v&&v.img)m[d.id]=v.img});faces=m;refreshFaces()},()=>{})}catch(e){}}
+    try{db.collection('faces').onSnapshot(snap=>{const m={};snap.docs.forEach(d=>{const v=d.data();if(v&&v.img)m[d.id]=v.img});faces=m;refreshFaces()},()=>{})}catch(e){}
+    if(RELAY&&myId)db.watch('faces/'+myId)}
   routeHash();
 }
 window.addEventListener('hashchange',routeHash);
