@@ -231,7 +231,7 @@ input[type=text],input[type=number]{background:var(--bg);border:1px solid var(--
 @keyframes shake{20%{transform:translate(-6px,3px)}40%{transform:translate(5px,-4px)}60%{transform:translate(-4px,2px)}80%{transform:translate(3px,-1px)}}
 
 .ibtn.proxy{width:auto;min-width:58px;padding:0 8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;line-height:1.05;font-weight:800;color:#C9CDE0}
-.ibtn.proxy .l{font-size:11px}
+.ibtn.proxy .l{font-size:10px;letter-spacing:-.02em;white-space:nowrap}
 .ibtn.proxy .v{font-family:var(--f-num);font-size:15px;letter-spacing:.06em}
 .ibtn.proxy[aria-pressed="true"]{border-color:#FFE1A1;background:linear-gradient(#F4B740,#C9840C);color:#2a1a00;box-shadow:0 0 14px rgba(244,183,64,.55),0 3px 0 #4a3000}
 .proxybar{display:flex;align-items:center;justify-content:center;gap:6px;font-size:13px;font-weight:800;color:#2a1a00;background:linear-gradient(#F4B740,#C9840C);border-radius:10px;padding:4px 10px;text-align:center}
@@ -1324,8 +1324,8 @@ function renderProxyBtn(s){
   const show=!!s&&isHost(s)&&!readOnly&&s.status!=='ended';
   b.hidden=!show;if(!show)return;
   b.setAttribute('aria-pressed',ui.proxy?'true':'false');
-  b.setAttribute('aria-label',ui.proxy?'代理操作オン（タップでオフ）':'代理操作オフ（タップでオン）');
-  b.innerHTML=`<span class="l">代理</span><span class="v">${ui.proxy?'ON':'OFF'}</span>`;
+  b.setAttribute('aria-label',ui.proxy?'ディーラーモードオン（タップでオフ）':'ディーラーモードオフ（タップでオン）');
+  b.innerHTML=`<span class="l">ディーラー</span><span class="v">${ui.proxy?'ON':'OFF'}</span>`;
 }
 function renderHeader(s){
   renderProxyBtn(s);
@@ -1524,7 +1524,7 @@ function renderBar(s){
   }else if(BETTING.includes(h.street)){
     const i=h.toAct;
     if(i>=0&&canCtl(s,i))html=actionBar(s,i);
-    else{html=`<div class="waitbar"><span>${i>=0?`<b>${esc(nm(s,i))}</b> の番です`:'待機中'}${i>=0&&isHost(s)&&!readOnly&&!ui.proxy?'<span class="sub">代わりに操作するときは右上の「代理」をONに</span>':''}</span></div>`;rp.hidden=true}
+    else{html=`<div class="waitbar"><span>${i>=0?`<b>${esc(nm(s,i))}</b> の番です`:'待機中'}${i>=0&&isHost(s)&&!readOnly&&!ui.proxy?'<span class="sub">代わりに操作するときは右上の「ディーラー」をONに</span>':''}</span></div>`;rp.hidden=true}
   }else if(h.street==='showdown'){
     rp.hidden=true;
     if(ui.winRev!==s.rev){ui.win={};ui.winRev=s.rev}
@@ -1563,7 +1563,7 @@ function actionBar(s,i){
     :onlyAllin?`<button class="abtn allin" data-a="act" data-t="allin">オールイン <span class="num">${fmt(maxTo)}</span></button>`
     :ui.raiseOpen?`<button class="abtn hot ${ui.raise>=maxTo?'allin':''}" data-a="raise" id="raiseBtn">${raiseLabel(s,i)}</button>`
     :`<button class="abtn" data-a="ropen">${verb} <span class="num">${fmtShort(minTo)}</span></button>`;
-  return `${me?'':`<div class="proxybar">代理操作中：${esc(p.name)} の番を操作しています</div>`}
+  return `${me?'':`<div class="proxybar">ディーラーモード：${esc(p.name)} の番を操作しています</div>`}
   <div class="acts">
     <button class="abtn" data-a="act" data-t="fold">フォールド</button>
     ${toCall>0?`<button class="abtn ${callAmt>=p.chips?'allin':''}" data-a="act" data-t="call">コール <span class="num">${fmtShort(callAmt)}</span></button>`:`<button class="abtn" data-a="act" data-t="check">チェック</button>`}
@@ -1655,7 +1655,7 @@ function renderSheet(){
         <button class="ghost" data-a="adjust">チップを反映</button>`:s.status==='playing'?'<p class="note">チップ調整はハンドの合間にできます。</p>':''}
       <div class="eyebrow" style="margin-top:4px">席の管理</div>
       <div class="row">${s.players.map((p,i)=>p.seated&&p.uid!==myId?`<button class="ghost" data-a="kick" data-i="${i}">${esc(p.name)} を退席</button>`:'').join('')||'<span class="note">ほかに座っている人はいません</span>'}</div>
-      <p class="note">ホストは全員の操作を代わりに行えます。</p>
+      <p class="note">右上の「ディーラー」をONにすると、ほかの人の番も代わりに操作できます。</p>
       ${demo?'':`<div class="eyebrow" style="margin-top:4px">テーブルの片付け</div>
       <button class="ghost" data-a="delTable" style="color:var(--red);${ui.armDel===s.code?'border-color:var(--red);background:rgba(229,72,77,.12)':''}">${ui.armDel===s.code?'本当に削除する（元に戻せません）':'このテーブルを削除'}</button>
       <p class="note">削除すると全員の画面からこの卓が消えます。使わなくなった卓は24時間で自動的に片付きます。</p>`}</div>`:''}
@@ -1692,7 +1692,7 @@ document.addEventListener('click',e=>{
     case 'menu':ui.menu=true;renderSheet();break;
     case 'menuclose':ui.menu=false;renderSheet();break;
     case 'proxy':ui.proxy=!ui.proxy;ui.raiseOpen=false;
-      toast(ui.proxy?'代理操作ON：ほかの人の番もあなたが操作できます':'代理操作OFF：自分の番だけ操作できます');
+      toast(ui.proxy?'ディーラーモードON：ほかの人の番もあなたが操作できます':'ディーラーモードOFF：自分の番だけ操作できます');
       if(state){renderProxyBtn(state);renderBar(state)}break;
     case 'hands':ui.menu=false;renderSheet();ui.hands=true;renderHands();break;
     case 'handsclose':ui.hands=false;renderHands();break;
