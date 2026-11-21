@@ -122,9 +122,17 @@ input[type=text],input[type=number]{background:var(--bg);border:1px solid var(--
 .seat.me .plate{border-color:var(--gold)}
 .seat.me .plate .nm{color:var(--gold)}
 .lastact{position:absolute;top:-14px;white-space:nowrap;font-size:11px;font-weight:800;border-radius:999px;padding:1px 9px;background:linear-gradient(#45C8F0,#1D8FBF);color:#00202e;box-shadow:0 2px 0 rgba(0,0,0,.35);z-index:3}
-.lastact.fold{background:#3B3F52;color:#C9CDE0}
-.lastact.allin{background:linear-gradient(#F4B740,#C9840C);color:#2a1a00}
+.lastact.call{background:linear-gradient(#3CCB8C,#1E9A62);color:#032816}
+.lastact.fold{background:linear-gradient(#5C95F5,#2F63CF);color:#fff}
 .lastact.raise{background:linear-gradient(#FF7A7E,#D23B40);color:#fff}
+.lastact.allin{background:linear-gradient(#FF7A7E,#D23B40);color:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.7),0 2px 0 rgba(0,0,0,.35)}
+/* action buttons: the same colours as the badges */
+.c-fold{border-color:#8DB8FF!important;background:linear-gradient(#3A7BEA,#1F4FB4)!important;color:#fff!important}
+.c-call{border-color:#86E3B8!important;background:linear-gradient(#25A86F,#157A4E)!important;color:#fff!important}
+.c-raise{border-color:#FF9EA2!important;background:linear-gradient(#D93C43,#A51F26)!important;color:#fff!important}
+.c-raise.hot{border-color:#FFD0D2!important;background:linear-gradient(#F0545A,#C0272E)!important;box-shadow:0 0 18px rgba(240,84,90,.6),0 4px 0 #4a0d11!important}
+.c-fold .num,.c-call .num,.c-raise .num{color:#fff!important}
+.c-call .ai{font-size:10px;font-weight:800;background:rgba(0,0,0,.25);border-radius:4px;padding:0 4px;margin-left:2px}
 .seat.fold .ava{filter:grayscale(1) brightness(.5)}
 .seat.fold .plate{opacity:.6}
 .seat.out{opacity:.35}
@@ -262,13 +270,13 @@ input[type=text],input[type=number]{background:var(--bg);border:1px solid var(--
 .fine{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .fine button{min-height:40px;border-radius:10px;border:2px solid var(--btn-line);background:linear-gradient(#3A2B78,#231950);font-weight:800;font-size:18px}
 .vslider{position:relative;width:72px;height:100%;display:flex;flex-direction:column;align-items:center;gap:6px}
-.vtop{font-size:11px;font-weight:800;color:var(--gold);text-align:center;line-height:1.15}
-.vtop .num{display:block;font-size:14px;background:linear-gradient(#F4B740,#C9840C);color:#2a1a00;border-radius:999px;padding:0 8px;margin-top:2px}
+.vtop{font-size:11px;font-weight:800;color:#FF9EA2;text-align:center;line-height:1.15}
+.vtop .num{display:block;font-size:14px;background:linear-gradient(#F0545A,#C0272E);color:#fff;border-radius:999px;padding:0 8px;margin-top:2px}
 .vtrack{position:relative;flex:1;width:58px;border-radius:14px;background:linear-gradient(#2B1F55,#150F2E);border:2px solid #6B54C8;touch-action:none;cursor:ns-resize;overflow:visible}
 .vtrack::before{content:"";position:absolute;left:50%;top:10px;bottom:10px;width:4px;transform:translateX(-50%);border-radius:2px;background:repeating-linear-gradient(#5E4BAE 0 2px,transparent 2px 14px)}
-.vfill{position:absolute;left:4px;right:4px;bottom:4px;border-radius:10px;background:linear-gradient(0deg,rgba(139,107,255,.55),rgba(244,183,64,.55))}
-.vthumb{position:absolute;left:50%;transform:translate(-50%,50%);min-width:70px;padding:6px 8px;border-radius:999px;background:linear-gradient(#8B6BFF,#5A3BD6);border:2px solid #CDBDFF;font-family:var(--f-num);font-weight:700;font-size:19px;text-align:center;box-shadow:0 0 18px rgba(139,107,255,.7),0 3px 0 #1c1240;white-space:nowrap}
-.vthumb.all{background:linear-gradient(#F4B740,#C9840C);border-color:#FFE1A1;color:#2a1a00;box-shadow:0 0 20px rgba(244,183,64,.7),0 3px 0 #4a3000}
+.vfill{position:absolute;left:4px;right:4px;bottom:4px;border-radius:10px;background:linear-gradient(0deg,rgba(217,60,67,.35),rgba(240,84,90,.7))}
+.vthumb{position:absolute;left:50%;transform:translate(-50%,50%);min-width:70px;padding:6px 8px;border-radius:999px;background:linear-gradient(#F0545A,#C0272E);border:2px solid #FFD0D2;font-family:var(--f-num);font-weight:700;font-size:19px;text-align:center;box-shadow:0 0 18px rgba(240,84,90,.6),0 3px 0 #4a0d11;white-space:nowrap}
+.vthumb.all{background:linear-gradient(#FF6B70,#B5242B);border-color:#fff;color:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.6),0 0 22px rgba(240,84,90,.8),0 3px 0 #4a0d11}
 .vmin{font-family:var(--f-num);font-size:12px;color:var(--muted)}
 
 /* action bar */
@@ -723,21 +731,21 @@ function applyTo(s0,fn,keepPrev){
   r.rev=(s0.rev||0)+1;r.updatedAt=Date.now();return r;
 }
 let writeChain=Promise.resolve(),serverState=null;
-async function write(fn,{keepPrev=true}={}){
+async function write(fn,{keepPrev=true,quiet=false}={}){
   if(demo){ // demo table lives only in this page
-    const r=applyTo(state,fn,keepPrev);if(r===false){toast('その操作は今はできません');return}
+    const r=applyTo(state,fn,keepPrev);if(r===false){if(!quiet)toast('その操作は今はできません');return}
     state=r;render();return;
   }
   if(!db||!code)return;
   if(readOnly){toast('このテーブルには書き込めません（観戦のみ）');return}
   // 1) show the result on this phone at once
   if(state&&state.code===code){
-    const r=applyTo(state,fn,keepPrev);if(r===false){toast('その操作は今はできません');return}
+    const r=applyTo(state,fn,keepPrev);if(r===false){if(!quiet)toast('その操作は今はできません');return}
     state=r;ui.pendingRev=r.rev;render();
   }
   // 2) save in order: each action is re-applied to the latest saved table under the turn lock
   const c=code;ui.pendingSaves=(ui.pendingSaves||0)+1;
-  writeChain=writeChain.then(()=>saveAction(c,fn,keepPrev)).finally(()=>{
+  writeChain=writeChain.then(()=>saveAction(c,fn,keepPrev,quiet)).finally(()=>{
     ui.pendingSaves--;
     if(!ui.pendingSaves){ui.pendingRev=0;if(code===c&&serverState&&state&&serverState.rev!==state.rev){state=serverState;render()}}
   });
@@ -753,7 +761,7 @@ async function takeTurnLock(c){
     if(wait<=0)return;await sleep(wait);
   }
 }
-async function saveAction(c,fn,keepPrev){
+async function saveAction(c,fn,keepPrev,quiet){
   if(!db)return;
   const ref=db.doc('tables/'+c);
   try{
@@ -764,7 +772,7 @@ async function saveAction(c,fn,keepPrev){
     const next=applyTo(server,fn,keepPrev);
     if(next===false){ // someone else changed the table first: show the saved table again
       serverState=server;if(code===c){state=server;ui.pendingRev=0;render()}
-      toast('ほかの人が先に操作したため、反映できませんでした');return;
+      if(!quiet)toast('ほかの人が先に操作したため、反映できませんでした');return;
     }
     await ref.set(next);serverState=next;
   }catch(e){
@@ -1478,7 +1486,7 @@ function seatsHtml(s,fx){
     const fold=h&&h.folded[i];
     const allin=h&&h.allin[i]&&h.inHand[i]&&!fold&&h.street!=='done';
     const last=h&&h.last?h.last[i]:'';
-    const lcls=last==='フォールド'?'fold':last==='オールイン'?'allin':(last==='レイズ'||last==='ベット')?'raise':'';
+    const lcls=last==='フォールド'?'fold':last==='オールイン'?'allin':(last==='レイズ'||last==='ベット')?'raise':(last==='コール'||last==='チェック')?'call':'';
     const won=h&&h.street==='done'&&h.result&&h.result[i]&&!winners.has(i);
     const tag=h&&h.sbI===i?'SB':h&&h.bbI===i?'BB':'';
     return `<div class="seat ${near?'near':''} ${mine?'me':''} ${turn?'turn':''} ${fold?'fold':''} ${allin?'allin':''} ${p.out&&s.status==='playing'?'out':''} ${won?'won':''}" ${wattr} id="seat${i}">
@@ -1634,14 +1642,14 @@ function actionBar(s,i){
   const callAmt=Math.min(toCall,p.chips);
   const onlyAllin=canRaise&&maxTo<=minTo;
   renderRaisePanel(s,i);
-  const raiseBtn=!canRaise?`<button class="abtn" disabled>${verb}</button>`
-    :onlyAllin?`<button class="abtn allin" data-a="act" data-t="allin">オールイン <span class="num">${fmt(maxTo)}</span></button>`
-    :ui.raiseOpen?`<button class="abtn hot ${ui.raise>=maxTo?'allin':''}" data-a="raise" id="raiseBtn">${raiseLabel(s,i)}</button>`
-    :`<button class="abtn" data-a="ropen">${verb} <span class="num">${fmtShort(minTo)}</span></button>`;
+  const raiseBtn=!canRaise?`<button class="abtn c-raise" disabled>${verb}</button>`
+    :onlyAllin?`<button class="abtn c-raise" data-a="act" data-t="allin">オールイン <span class="num">${fmt(maxTo)}</span></button>`
+    :ui.raiseOpen?`<button class="abtn c-raise hot" data-a="raise" id="raiseBtn">${raiseLabel(s,i)}</button>`
+    :`<button class="abtn c-raise" data-a="ropen">${verb} <span class="num">${fmtShort(minTo)}</span></button>`;
   return `${me?'':`<div class="proxybar">ディーラーモード：${esc(p.name)} の番を操作しています</div>`}
   <div class="acts">
-    <button class="abtn" data-a="act" data-t="fold">フォールド</button>
-    ${toCall>0?`<button class="abtn ${callAmt>=p.chips?'allin':''}" data-a="act" data-t="call">コール <span class="num">${fmtShort(callAmt)}</span></button>`:`<button class="abtn" data-a="act" data-t="check">チェック</button>`}
+    <button class="abtn c-fold" data-a="act" data-t="fold">フォールド</button>
+    ${toCall>0?`<button class="abtn c-call" data-a="act" data-t="call">コール <span class="num">${fmtShort(callAmt)}</span>${callAmt>=p.chips?'<span class="ai">ALL IN</span>':''}</button>`:`<button class="abtn c-call" data-a="act" data-t="check">チェック</button>`}
     ${raiseBtn}
   </div>`;
 }
@@ -1796,8 +1804,8 @@ document.addEventListener('click',e=>{
     case 'rstep':stepRaise(+b.dataset.d);break;
     case 'rset':{const {minTo,maxTo}=raiseBounds(s,s.hand.toAct);ui.raise=Math.max(minTo,Math.min(maxTo,+b.dataset.v));ui.preset=b.dataset.l||null;updateRaiseUi();clack(0,2);break}
     case 'pick':{const k=+b.dataset.k,i=+b.dataset.i;const cur=ui.win[k]||[];ui.win[k]=cur.includes(i)?cur.filter(x=>x!==i):cur.concat(i);renderBar(s);break}
-    case 'settle':{const w=JSON.parse(JSON.stringify(ui.win)),r=s.rev;write(x=>{if(x.rev!==r)return false;const wins=x.hand.pots.map((_,k)=>w[k]||[]);return settle(x,wins)?undefined:false});break}
-    case 'next':{const r=s.rev;write(x=>{if(x.rev!==r||!x.hand||x.hand.street!=='done')return false;startHand(x)});break}
+    case 'settle':{const w=JSON.parse(JSON.stringify(ui.win)),r=s.rev;write(x=>{if(x.rev!==r)return false;const wins=x.hand.pots.map((_,k)=>w[k]||[]);return settle(x,wins)?undefined:false},{quiet:true});break}
+    case 'next':{const r=s.rev;write(x=>{if(x.rev!==r||!x.hand||x.hand.street!=='done')return false;startHand(x)},{quiet:true});break}
     case 'undo':write(x=>{if(!x.prev)return false;const p=JSON.parse(x.prev);p.rev=x.rev;addLog(p,'ホストが1つ前に戻しました');return p},{keepPrev:false});ui.menu=false;break;
     case 'end':write(x=>{x.status='ended';x.hand=null;addLog(x,'ホストがゲームを終了しました')});ui.menu=false;break;
     case 'rematch':write(x=>{x.status='lobby';x.hand=null;x.handNo=0;x.dealer=null;x.sb=x.settings.sb;x.bb=x.settings.bb;x.players.forEach(p=>{p.chips=x.settings.start;p.out=false});addLog(x,'再戦の準備ができました')},{keepPrev:false});break;
