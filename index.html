@@ -8,6 +8,7 @@
 <body>
 <title>みんなのチップ卓</title>
 <meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" as="script">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;700;800&family=Oswald:wght@500;600;700&family=Playfair+Display:ital,wght@1,800&display=swap">
@@ -149,6 +150,7 @@ input[type=text],input[type=number]{background:var(--bg);border:1px solid var(--
 /* 3D stage */
 .stage{background:#0d0f16;max-width:none;width:auto;margin-inline:calc(-1 * max(16px,env(safe-area-inset-left,0px))) calc(-1 * max(16px,env(safe-area-inset-right,0px)))}
 #gl{position:absolute;inset:0;width:100%;height:100%;display:block}
+#gl2{position:absolute;display:block;pointer-events:none}
 .flatfelt{position:absolute;left:9%;right:9%;top:9%;bottom:9%;border-radius:9999px;background:radial-gradient(80% 60% at 50% 45%,#4B7EEA,#213F9E);border:14px solid #17181e;box-shadow:0 18px 40px rgba(0,0,0,.6)}
 .seat{transform:translate(-50%,-62%) scale(var(--s,1));transform-origin:50% 62%;width:90px}
 .ava{border-color:#F28C28}
@@ -392,6 +394,7 @@ input[type=text],input[type=number]{background:var(--bg);border:1px solid var(--
   </header>
   <div class="stage" id="stage">
     <canvas id="gl" aria-label="ポーカーテーブル"></canvas>
+    <canvas id="gl2" aria-hidden="true" hidden></canvas>
     <div class="flatfelt" id="flatFelt" hidden></div>
     <div id="labels"></div>
     <div id="seats"></div>
@@ -410,7 +413,6 @@ input[type=text],input[type=number]{background:var(--bg);border:1px solid var(--
 <div id="tv" class="tv" hidden></div>
 <div id="toast" class="toast" hidden role="status"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 "use strict";
 const $=s=>document.querySelector(s);
@@ -423,6 +425,10 @@ const STREET={preflop:'プリフロップ',flop:'フロップ',turn:'ターン',
 const BOARD={preflop:0,flop:3,turn:4,river:5,showdown:5,done:5};
 const BETTING=['preflop','flop','turn','river'];
 const reduceMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
+// the 3D library is only needed at the table, so the lobby works before it has downloaded
+const THREE_JS='https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+let threeState=window.THREE?1:0; // 0 loading, 1 ready, 2 failed (flat table)
+const threeReady=(window.THREE?Promise.resolve():loadScript(THREE_JS)).then(()=>{threeState=1},()=>{threeState=2});
 
 let db=null,user=null,myId=null,readOnly=false;
 let code=null,state=null,prevState=null,unsub=null,loadTimer=null;
@@ -709,38 +715,64 @@ function settle(s,wins){
 const tableRef=()=>db.doc('tables/'+code);
 // tables made by the first version have no seat flags or action labels
 function norm(s){(s.players||[]).forEach(p=>{if(p.seated===undefined)p.seated=true});if(s.hand&&!s.hand.last)s.hand.last=s.players.map(()=>'');return s}
+// apply an action to a copy of a table; false when the action is not allowed on that table
+function applyTo(s0,fn,keepPrev){
+  const s=JSON.parse(JSON.stringify(s0));const {prev,...rest}=s;const before=JSON.stringify(rest);
+  const out=fn(s);if(out===false)return false;
+  let r=s;if(out&&typeof out==='object'){r=out;delete r.prev}else if(keepPrev)r.prev=before;
+  r.rev=(s0.rev||0)+1;r.updatedAt=Date.now();return r;
+}
+let writeChain=Promise.resolve(),serverState=null;
 async function write(fn,{keepPrev=true}={}){
   if(demo){ // demo table lives only in this page
-    const s0=JSON.parse(JSON.stringify(state));const {prev,...rest}=s0;const before=JSON.stringify(rest);
-    let s=s0;const out=fn(s);
-    if(out===false){toast('その操作は今はできません');return}
-    if(out&&typeof out==='object'){s=out;delete s.prev}else if(keepPrev)s.prev=before;
-    s.rev=(s.rev||0)+1;s.updatedAt=Date.now();state=s;render();return;
+    const r=applyTo(state,fn,keepPrev);if(r===false){toast('その操作は今はできません');return}
+    state=r;render();return;
   }
-  if(!db||!code||ui.busy)return;
+  if(!db||!code)return;
   if(readOnly){toast('このテーブルには書き込めません（観戦のみ）');return}
-  ui.busy=true;
+  // 1) show the result on this phone at once
+  if(state&&state.code===code){
+    const r=applyTo(state,fn,keepPrev);if(r===false){toast('その操作は今はできません');return}
+    state=r;ui.pendingRev=r.rev;render();
+  }
+  // 2) save in order: each action is re-applied to the latest saved table under the turn lock
+  const c=code;ui.pendingSaves=(ui.pendingSaves||0)+1;
+  writeChain=writeChain.then(()=>saveAction(c,fn,keepPrev)).finally(()=>{
+    ui.pendingSaves--;
+    if(!ui.pendingSaves){ui.pendingRev=0;if(code===c&&serverState&&state&&serverState.rev!==state.rev){state=serverState;render()}}
+  });
+  return writeChain;
+}
+async function takeTurnLock(c){
+  // leases cannot be released, so keep them at the 1 s minimum and wait only until the current one ends
+  const lock=db.doc('locks/'+c),giveUp=Date.now()+1500;
+  for(;;){
+    let r;try{r=await lock.acquire({holder:tabId,ttlMs:1000})}catch(e){return}
+    if(r.acquired)return;
+    const wait=Math.min(giveUp-Date.now(),Math.max(60,(Date.parse(r.expiresAt)||0)-Date.now()+40));
+    if(wait<=0)return;await sleep(wait);
+  }
+}
+async function saveAction(c,fn,keepPrev){
+  if(!db)return;
+  const ref=db.doc('tables/'+c);
   try{
-    const lock=db.doc('locks/'+code);
-    for(let k=0;k<6;k++){
-      try{const r=await lock.acquire({holder:tabId,ttlMs:4000});if(r.acquired)break}catch(e){break}
-      await sleep(250+Math.random()*300);
-    }
-    const snap=await tableRef().get();
+    await takeTurnLock(c);
+    const snap=await ref.get();
     if(!snap.exists){toast('テーブルが見つかりません');return}
-    let s=norm(JSON.parse(JSON.stringify(snap.data())));
-    const {prev,...rest}=s;const before=JSON.stringify(rest);
-    const out=fn(s);
-    if(out===false){toast('その操作は今はできません');return}
-    if(out&&typeof out==='object'){s=out;delete s.prev}
-    else if(keepPrev)s.prev=before;
-    s.rev=(s.rev||0)+1;s.updatedAt=Date.now();
-    await tableRef().set(s);
+    const server=norm(JSON.parse(JSON.stringify(snap.data())));
+    const next=applyTo(server,fn,keepPrev);
+    if(next===false){ // someone else changed the table first: show the saved table again
+      serverState=server;if(code===c){state=server;ui.pendingRev=0;render()}
+      toast('ほかの人が先に操作したため、反映できませんでした');return;
+    }
+    await ref.set(next);serverState=next;
   }catch(e){
-    if(e&&e.code==='invalid_argument'){readOnly=true;toast('書き込めませんでした。このページの編集権限が必要です');render()}
+    if(e&&e.code==='invalid_argument'){readOnly=true;toast('書き込めませんでした。このページの編集権限が必要です')}
     else if(e&&e.code==='quota_exceeded')toast('保存容量がいっぱいです');
     else toast('通信に失敗しました。もう一度お試しください');
-  }finally{ui.busy=false}
+    try{const sn=await ref.get();if(sn.exists&&code===c){serverState=norm(JSON.parse(JSON.stringify(sn.data())));state=serverState;ui.pendingRev=0;render()}}catch(_){}
+  }
 }
 
 /* ---------------- public relay (outside Claude) ----------------
@@ -813,7 +845,20 @@ function makeRelay(){
   });
 }
 // faces are fetched only for people sitting at the open table
-function relayWatchFaces(s){if(!RELAY||!db||!s)return;s.players.forEach(p=>{if(p.uid)db.watch('faces/'+p.uid)})}
+// face photos are fetched only for the people at the open table (and yourself)
+const faceSubs=new Map();let faceT=0;
+function watchFaces(uids){
+  if(!db||demo)return;
+  uids.forEach(u=>{
+    if(!u||faceSubs.has(u))return;
+    if(RELAY){faceSubs.set(u,true);db.watch('faces/'+u);return}
+    try{faceSubs.set(u,db.doc('faces/'+u).onSnapshot(sn=>{
+      const v=sn.exists?sn.data():null,img=(v&&v.img)||'';
+      if((faces[u]||'')===img)return;if(img)faces[u]=img;else delete faces[u];
+      cancelAnimationFrame(faceT);faceT=requestAnimationFrame(refreshFaces);
+    },()=>{}))}catch(e){}
+  });
+}
 
 /* ---------------- lobby actions ---------------- */
 function genCode(){const A='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';return range(6).map(()=>A[Math.floor(Math.random()*A.length)]).join('')}
@@ -861,7 +906,9 @@ function openTable(c){
       ['#labels','#seats','#hud'].forEach(q=>$(q).innerHTML='');$('#raisePanel').hidden=true;if(G.ok){clearScene3D()}
       $('#gTitle').textContent=was?'テーブルは削除されました':'テーブル '+c;$('#gSub').textContent=was?'ホストがこのテーブルを片付けました':'このコードのテーブルはありません';
       $('#bar').innerHTML=`<button class="pbtn" data-a="back">ロビーに戻る</button>`}return}
-    state=norm(JSON.parse(JSON.stringify(snap.data())));render();
+    const d=norm(JSON.parse(JSON.stringify(snap.data())));serverState=d;
+    if(ui.pendingRev&&d.rev<ui.pendingRev)return; // an older copy than what this phone already shows
+    state=d;render();
   },()=>{clearTimeout(loadTimer);$('#gSub').textContent='テーブルを読み込めませんでした'});
 }
 async function deleteTable(c){
@@ -878,7 +925,7 @@ async function cleanupMine(){
       if(idle>864e5||(t.status==='ended'&&idle>36e5))await deleteTable(d.id)}
   }catch(e){}
 }
-function clearScene3D(){G.bet.forEach(g=>g&&G.scene.remove(g));G.bet=[];if(G.pot)G.scene.remove(G.pot);G.pot=null;if(G.myStack)G.scene.remove(G.myStack);G.myStack=null;
+function clearScene3D(){G.bet.forEach(drop3);G.bet=[];drop3(G.pot);G.pot=null;drop3(G.myStack);G.myStack=null;
   G.slots.forEach(m=>{m.material=G.slotOff});G.slotLit=0;G.dealer.visible=false;G.ring.visible=false;G.dirty=true}
 const NPC_NAMES=['けんじ','さき','ゆう','まこと','あや'];
 function openDemo(){
@@ -993,6 +1040,7 @@ function init3D(){
   r.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
   r.outputEncoding=T.sRGBEncoding;
   r.shadowMap.enabled=true;r.shadowMap.type=T.PCFSoftShadowMap;
+  r.shadowMap.autoUpdate=false;r.shadowMap.needsUpdate=true; // shadows are recomputed only when something moves
   const sc=new T.Scene();G.scene=sc;
   G.camera=new T.PerspectiveCamera(42,1,0.1,120);
   sc.add(new T.HemisphereLight(0xe3ecff,0x1b1d26,0.62));
@@ -1002,6 +1050,11 @@ function init3D(){
   sc.add(sp);sc.add(sp.target);
   const fill=new T.DirectionalLight(0xc4d6ff,0.32);fill.position.set(0,7,14);sc.add(fill);
   buildTable();buildChips();buildSlots();buildDealer();buildRing();
+  // a second, small canvas redraws just the area around the pulsing turn ring with the same scene and lights,
+  // so the breathing ring does not repaint the whole table every frame
+  try{const r2=new T.WebGLRenderer({canvas:$('#gl2'),antialias:true,alpha:true,powerPreference:'high-performance'});
+    if(r2.getContext()){r2.setPixelRatio(r.getPixelRatio());r2.outputEncoding=T.sRGBEncoding;r2.shadowMap.enabled=true;r2.shadowMap.type=T.PCFSoftShadowMap;
+      r2.shadowMap.autoUpdate=false;r2.shadowMap.needsUpdate=true;G.r2=r2;G.cam2=new T.PerspectiveCamera()}}catch(e){G.r2=null}
   G.ok=true;
   try{new ResizeObserver(()=>resize3D()).observe($('#stage'))}catch(e){window.addEventListener('resize',resize3D)}
   resize3D();
@@ -1096,18 +1149,24 @@ function buildChips(){
   });
 }
 const OFF=[[0,0],[0.47,0.06],[-0.47,0.06],[0.23,-0.4],[-0.24,-0.4]];
-function stack3(amount,unit,maxStacks,cap){
-  const T=G.T,g=new T.Group();
+function seeded(n){let a=n|0;return ()=>{a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+// one draw per colour instead of one per chip; the same amount always stacks the same way
+function stack3(amount,unit,maxStacks,cap,seed){
+  const T=G.T,g=new T.Group(),rnd=seeded(seed==null?Math.random()*1e9:seed),m4=new T.Matrix4(),q=new T.Quaternion(),pos=new T.Vector3(),one=new T.Vector3(1,1,1),up=new T.Vector3(0,1,0);
   chipParts(amount,unit,maxStacks).forEach((p,si)=>{
     const [ox,oz]=OFF[si],cnt=Math.min(p.c,cap);
+    const im=new T.InstancedMesh(G.chipGeo,G.chipMat[p.k],cnt);
     for(let j=0;j<cnt;j++){
-      const m=new T.Mesh(G.chipGeo,G.chipMat[p.k]);
-      m.position.set(ox+(Math.random()-.5)*0.022,0.036+j*0.073,oz+(Math.random()-.5)*0.022);
-      m.rotation.y=Math.random()*6.28;m.castShadow=true;m.receiveShadow=true;g.add(m);
+      pos.set(ox+(rnd()-.5)*0.022,0.036+j*0.073,oz+(rnd()-.5)*0.022);q.setFromAxisAngle(up,rnd()*6.28);
+      im.setMatrixAt(j,m4.compose(pos,q,one));
     }
+    im.instanceMatrix.needsUpdate=true;im.castShadow=true;im.receiveShadow=true;im.frustumCulled=false;g.add(im);
   });
+  g.userData.amt=amount;
   return g;
 }
+function drop3(g){if(!g)return;G.scene.remove(g);g.traverse(o=>{if(o.isInstancedMesh)o.dispose()});G.dirty=true}
+const seedOf=(...a)=>a.reduce((h,v)=>Math.imul(h^(typeof v==='number'?v:String(v).split('').reduce((x,c)=>x*31+c.charCodeAt(0)|0,7)),16777619)|0,2166136261);
 function buildSlots(){
   const T=G.T;
   const off=canvasTex(128,184,(x,w,h)=>{x.strokeStyle='rgba(255,255,255,.6)';x.lineWidth=5;rrect(x,6,6,w-12,h-12,12);x.stroke()});
@@ -1136,7 +1195,7 @@ function resize3D(){
   if(!G.ok)return;
   const st=$('#stage'),W=Math.max(1,st.clientWidth),H=Math.max(1,st.clientHeight);
   if(W===G.W&&H===G.H)return;
-  G.W=W;G.H=H;G.r.setSize(W,H,false);
+  G.W=W;G.H=H;G.r.setSize(W,H); // exact pixel size, so the ring patch lines up with the table
   fitCamera();
   if(!G.camAnim){G.camera.position.copy(G.home.pos);G.camera.lookAt(G.home.target)}
   G.dirty=true;placeOverlay();
@@ -1163,6 +1222,7 @@ function loop(now){
   requestAnimationFrame(loop);
   if(!G.ok||document.hidden||$('#game').hidden)return;
   let act=G.dirty,cam=false;
+  const content=G.dirty||G.tw.length>0; // decided before tweens finish, so a landing chip still updates its shadow
   if(G.camAnim){const c=G.camAnim,k=Math.min(1,(now-c.t0)/c.dur),e=1-Math.pow(1-k,3);G.camera.position.lerpVectors(c.from,c.to,e);G.camera.lookAt(c.target);if(k>=1)G.camAnim=null;act=true;cam=true}
   for(let j=G.tw.length-1;j>=0;j--){
     const t=G.tw[j],k=(now-t.t0)/t.dur;
@@ -1170,8 +1230,29 @@ function loop(now){
     const kk=Math.min(1,k);t.f(kk);act=true;
     if(kk>=1){G.tw.splice(j,1);if(t.done)t.done()}
   }
-  if(G.ring.visible&&now-G.lastRing>33){const w=(1+Math.sin(now/230))/2;G.ring.material.opacity=0.25+0.45*w;G.ring.scale.setScalar(1+0.08*w);G.lastRing=now;act=true}
-  if(act){G.r.render(G.scene,G.camera);G.dirty=false;if(cam)placeOverlay()}
+  let pulse=false;
+  if(G.ring.visible&&now-G.lastRing>33){const w=(1+Math.sin(now/230))/2;G.ring.material.opacity=0.25+0.45*w;G.ring.scale.setScalar(1+0.08*w);G.lastRing=now;pulse=true}
+  const patch=!!G.r2;
+  if(act||(pulse&&!patch)){
+    if(act&&content){G.r.shadowMap.needsUpdate=true;if(G.r2)G.r2.shadowMap.needsUpdate=true}
+    if(patch&&G.ring.visible){G.ring.visible=false;G.r.render(G.scene,G.camera);G.ring.visible=true}else G.r.render(G.scene,G.camera);
+    G.dirty=false;if(cam)placeOverlay();
+  }
+  if(patch&&(act||pulse))ringPatch();
+}
+function ringPatch(){
+  const c2=$('#gl2');
+  if(!G.ring.visible){if(!c2.hidden)c2.hidden=true;return}
+  const T=G.T,v=new T.Vector3(),R=0.6;let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+  for(let k=0;k<20;k++){const a=k/20*Math.PI*2;v.set(G.ring.position.x+Math.cos(a)*R,0.02,G.ring.position.z+Math.sin(a)*R).project(G.camera);
+    const x=(v.x+1)/2*G.W,y=(1-v.y)/2*G.H;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y)}
+  x0=Math.max(0,Math.floor(x0-3));y0=Math.max(0,Math.floor(y0-3));x1=Math.min(G.W,Math.ceil(x1+3));y1=Math.min(G.H,Math.ceil(y1+3));
+  const w=x1-x0,h=y1-y0;if(w<4||h<4){c2.hidden=true;return}
+  if(G.r2w!==w||G.r2h!==h){G.r2.setSize(w,h,false);G.r2w=w;G.r2h=h;c2.style.width=w+'px';c2.style.height=h+'px'}
+  c2.style.left=x0+'px';c2.style.top=y0+'px';
+  const cam=G.cam2;cam.copy(G.camera);cam.setViewOffset(G.W,G.H,x0,y0,w,h);cam.updateProjectionMatrix();
+  G.r2.render(G.scene,cam);
+  if(c2.hidden)c2.hidden=false;
 }
 function proj(p){
   if(G.ok){
@@ -1194,12 +1275,12 @@ function flyStack(from,to,amt,unit,delay,dur,lift,cap){
   const spin=(Math.random()-.5)*3;
   tween(delay,dur,k=>{g.visible=true;const e=ease(k);
     g.position.set(from.x+(to.x-from.x)*e,from.y+(to.y-from.y)*e+Math.sin(Math.PI*e)*lift,from.z+(to.z-from.z)*e);g.rotation.y=spin*e},
-    ()=>G.scene.remove(g));
+    ()=>drop3(g));
 }
 function setGroup(oldG,newG,delay){
   if(newG){newG.visible=delay<=0;G.scene.add(newG)}
-  if(delay<=0){if(oldG)G.scene.remove(oldG);return}
-  tween(delay,1,()=>{},()=>{if(oldG)G.scene.remove(oldG);if(newG){newG.visible=true;popIn(newG)}});
+  if(delay<=0){drop3(oldG);return}
+  tween(delay,1,()=>{},()=>{drop3(oldG);if(newG){newG.visible=true;popIn(newG)}});
 }
 function popIn(g){if(reduceMotion)return;tween(0,220,k=>{const e=1+0.25*Math.sin(Math.PI*k)*(1-k);g.scale.set(e,1,e)})}
 
@@ -1210,33 +1291,39 @@ function sync3D(s,fx,prev){
   // bets in front of each player
   const betFx=new Set(fx.bets.map(b=>b.i));
   for(let i=0;i<Math.max(n,G.bet.length);i++){
-    const old=G.bet[i]||null,amt=h&&i<n?h.bets[i]:0;
+    const old=G.bet[i]||null,amt=h&&i<n?h.bets[i]:0,b=i<n?L[i].bet:null;
+    if(old&&amt>0&&old.userData.amt===amt&&!betFx.has(i)){old.position.set(b.x,0,b.z);continue} // unchanged: keep it
     let ng=null;
-    if(amt>0){ng=stack3(amt,u,3,10);const b=L[i].bet;ng.position.set(b.x,0,b.z)}
+    if(amt>0){ng=stack3(amt,u,3,10,seedOf('bet',i,amt));ng.position.set(b.x,0,b.z)}
     setGroup(old,ng,motion&&betFx.has(i)&&!fx.collect.length?T.tBet:0);
     G.bet[i]=ng;
   }
-  G.bet.length=n;
+  for(let i=n;i<G.bet.length;i++)drop3(G.bet[i]);G.bet.length=n;
   // pot in the middle
   const potAll=h?h.total.reduce((a,b)=>a+b,0):0;
   const potCollected=h&&h.street!=='done'?potAll-h.bets.reduce((a,b)=>a+b,0):0;
   const oldPot=G.pot;let np=null;
   if(h&&h.street==='done'&&fx.win.length&&motion){
-    np=stack3(potAll,u,5,14);np.position.set(POT3.x,0,POT3.z);
+    np=stack3(potAll,u,5,14,seedOf('pot',potAll));np.position.set(POT3.x,0,POT3.z);
     setGroup(oldPot,np,fx.collect.length?T.tCol:0);
-    const g=np;tween(T.tCol+140,1,()=>{},()=>G.scene.remove(g));
+    const g=np;tween(T.tCol+140,1,()=>{},()=>drop3(g));
     G.pot=null;
   }else{
-    if(potCollected>0){np=stack3(potCollected,u,5,14);np.position.set(POT3.x,0,POT3.z)}
-    setGroup(oldPot,np,motion&&fx.collect.length?T.tCol:0);
+    if(oldPot&&potCollected>0&&oldPot.userData.amt===potCollected&&!fx.collect.length){oldPot.position.set(POT3.x,0,POT3.z);np=oldPot}
+    else{
+      if(potCollected>0){np=stack3(potCollected,u,5,14,seedOf('pot',potCollected));np.position.set(POT3.x,0,POT3.z)}
+      setGroup(oldPot,np,motion&&fx.collect.length?T.tCol:0);
+    }
     G.pot=np;
   }
   // my own chips, stacked in front of me
   const meI=mySeat(s);
-  if(G.myStack){G.scene.remove(G.myStack);G.myStack=null}
-  if(meI>=0&&s.players[meI].chips>0&&G.homeCam){
+  const myAmt=meI>=0&&G.homeCam?s.players[meI].chips:0;
+  if(G.myStack&&G.myStack.userData.amt!==myAmt){drop3(G.myStack);G.myStack=null}
+  if(myAmt>0){
     const p=rayToPlane(G.homeCam,0.42,-0.74,0);
-    G.myStack=stack3(s.players[meI].chips,u,4,12);G.myStack.position.set(p.x,0,p.z);G.myStack.rotation.y=0.3;G.scene.add(G.myStack);
+    if(!G.myStack){G.myStack=stack3(myAmt,u,4,12,seedOf('me',myAmt));G.myStack.rotation.y=0.3;G.scene.add(G.myStack)}
+    G.myStack.position.set(p.x,0,p.z);
   }
   // board slots
   const lit=h?BOARD[h.street]:0;
@@ -1283,7 +1370,12 @@ const shortName=n=>String(n||'?').trim().slice(0,1)||'?';
 
 function render(){
   if(!state)return;
-  relayWatchFaces(state);
+  watchFaces(state.players.map(p=>p.uid));
+  if(!prevState&&threeState===0){ // first paint of the table waits for the 3D library (usually already here)
+    $('#gSub').textContent='テーブルを準備しています…';
+    if(!ui.wait3d){ui.wait3d=true;threeReady.then(()=>{ui.wait3d=false;if(state&&!prevState)render()})}
+    return;
+  }
   const s=state,prev=prevState;
   const fx=computeFx(prev,s);
   const ae=document.activeElement,keep=ae&&ae.id&&ae.tagName==='INPUT'?{id:ae.id,v:ae.value,s:ae.selectionStart}:null;
@@ -1763,7 +1855,8 @@ async function boot(){
   else if(!RELAY)conn.hidden=true;
   if(db){try{db.collection('tables').orderBy('updatedAt','desc').limit(8).onSnapshot(renderTables,()=>{$('#tables').innerHTML=''})}catch(e){}
     setTimeout(cleanupMine,1500);
-    try{db.collection('faces').onSnapshot(snap=>{const m={};snap.docs.forEach(d=>{const v=d.data();if(v&&v.img)m[d.id]=v.img});faces=m;refreshFaces()},()=>{})}catch(e){}
+    if(RELAY){try{db.collection('faces').onSnapshot(snap=>{const m={};snap.docs.forEach(d=>{const v=d.data();if(v&&v.img)m[d.id]=v.img});faces=m;refreshFaces()},()=>{})}catch(e){}}
+    else if(myId)watchFaces([myId]);
     if(RELAY&&myId)db.watch('faces/'+myId)}
   routeHash();
 }

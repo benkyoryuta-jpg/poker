@@ -51,7 +51,7 @@ index.html              アプリ本体（HTML・CSS・JavaScript を1ファイ�
 docs/screenshots/       README用の画面写真
 ```
 
-外部から読み込むのは three.js（cdnjs、r128）、mqtt.js（unpkg、5.15.1、GitHub版のみ）、Google Fonts だけです。ビルドは不要です。
+three.js はテーブルに入るときに使うので、ロビーを表示したあと裏で読み込みます。外部から読み込むのは three.js（cdnjs、r128）、mqtt.js（unpkg、5.15.1、GitHub版のみ）、Google Fonts だけです。ビルドは不要です。
 
 ## 注意
 
