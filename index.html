@@ -210,8 +210,11 @@ input[type=text],input[type=number]{background:var(--bg);border:1px solid var(--
 .ltc .top .pos{font-family:var(--f-num);font-size:14px;font-weight:700;background:#fff;color:#111;padding:0 5px;line-height:18px}
 .ltc .bot{display:flex;align-items:center;justify-content:flex-end;gap:8px;height:29px;padding:0 10px;background:rgba(0,0,0,.88);font-family:var(--f-num)}
 .ltc .bot .stk{font-size:15px;color:#fff;font-weight:600}
-.ltc .bot .act{font-size:17px;font-weight:700;color:#FF3B30;letter-spacing:.02em}
-.ltc .bot .act.calm{color:#E9E9E9}
+.ltc .bot .act{font-size:19px;font-weight:700;color:#E9E9E9;letter-spacing:.03em}
+.ltc .bot .act .n{color:#fff;font-weight:600}
+.ltc .bot .act.k-call{color:#3DDC8E}
+.ltc .bot .act.k-fold{color:#6FA8FF}
+.ltc .bot .act.k-raise{color:#FF4D52}
 
 /* call-out (ALL-IN / WIN): sits in the upper half only, short, never blocks taps */
 .tv{position:fixed;left:0;right:0;top:env(safe-area-inset-top,0px);height:50%;z-index:30;display:grid;place-items:center;pointer-events:none}
@@ -1517,18 +1520,21 @@ function renderLT(s){
   box.innerHTML=list.slice(-3).map(i=>{
     const p=s.players[i],f=faceOf(p.uid),last=h.last?h.last[i]:'';
     // only what is in front of the player this round (chips already pulled into the pot are left out)
-    const bet=h.bets[i]>0?' '+fmt(h.bets[i]):'';
-    let act='',calm=false;
-    if(h.allin[i]&&!h.folded[i])act='ALL-IN'+bet;
-    else if(last==='レイズ')act='RAISE'+bet;
-    else if(last==='ベット')act='BET'+bet;
-    else if(last==='コール')act='CALL'+bet;
-    else{act=ACT_EN[last]||'';calm=last==='チェック'||last==='フォールド'}
-    const key=i+'|'+(act.split(' ')[0]);next.add(key);
+    const amt=h.bets[i]>0?fmt(h.bets[i]):'';
+    // the action word takes the same colour as its button: call/check green, fold blue, bet/raise/all-in red
+    let word='',kind='',num='';
+    if(h.allin[i]&&!h.folded[i]){word='ALL-IN';kind='raise';num=amt}
+    else if(last==='レイズ'){word='RAISE';kind='raise';num=amt}
+    else if(last==='ベット'){word='BET';kind='raise';num=amt}
+    else if(last==='コール'){word='CALL';kind='call';num=amt}
+    else if(last==='チェック'){word='CHECK';kind='call'}
+    else if(last==='フォールド'){word='FOLD';kind='fold'}
+    else word=ACT_EN[last]||'';
+    const key=i+'|'+word;next.add(key);
     return `<div class="ltc ${shown.has(key)?'':'in'}">
       <div class="ph" style="${f?`background-image:url('${f}')`:`background:hsl(${hue(i,p.name)} 55% 38%)`}">${f?'':esc(shortName(p.name))}</div>
       <div class="top"><span class="no">${i+1}</span><span class="nm">${esc(p.name)}</span>${posOf(s,i)?`<span class="pos">${posOf(s,i)}</span>`:''}</div>
-      <div class="bot"><span class="act ${calm?'calm':''}">${act}</span></div>
+      <div class="bot"><span class="act ${kind?'k-'+kind:''}">${word}${num?` <span class="n">${num}</span>`:''}</span></div>
     </div>`}).join('');
   ui.ltShown=next;
   clearTimeout(ui.ltT);
@@ -1871,6 +1877,5 @@ async function boot(){
 window.addEventListener('hashchange',routeHash);
 boot();
 </script>
-
 </body>
 </html>
